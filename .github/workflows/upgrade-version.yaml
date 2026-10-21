@@ -111,7 +111,7 @@ jobs:
             ${{ env.GIT_COMMIT_MESSAGE }}
             ```
 
-            **NOTE**: Make sure other references to NixOS versions, particularly within the `publish` workflow, are updated too before merging!
+            This also bumps `system.stateVersion` in `configuration.nix`, so new images start on ${{ env.LATEST_NIXOS_RELEASE }}.
           add-paths: |
             flake.nix
             flake.lock
