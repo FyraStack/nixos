@@ -1,0 +1,104 @@
+name: "Import published release image into Proxmox"
+
+# Runs when a release draft from publish.yaml is published, since Proxmox can only
+# download public release assets
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  push-to-proxmox:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      PROXMOX_API_URL: ${{ vars.PROXMOX_API_URL }}
+      PROXMOX_NODE: ${{ vars.PROXMOX_NODE }}
+      PROXMOX_IMPORT_STORAGE: ${{ vars.PROXMOX_IMPORT_STORAGE || 'local' }}
+      PROXMOX_TOKEN_ID: ${{ secrets.PROXMOX_TOKEN_ID }}
+      PROXMOX_TOKEN_SECRET: ${{ secrets.PROXMOX_TOKEN_SECRET }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.release.tag_name }}
+      - name: Determine image name and download URL
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          nixos_version=$(jq -r '
+            .nodes.root.inputs.nixpkgs as $root_pkgs
+            | .nodes[$root_pkgs].original.ref
+            | sub("nixos-"; "")
+          ' flake.lock)
+
+          assets=$(gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" \
+            --jq '[.assets[] | select(.name | endswith(".qcow2"))]')
+          if [ "$(jq length <<<"$assets")" -ne 1 ]; then
+            echo "Error: expected exactly one .qcow2 asset on release ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+
+          {
+            echo "filename=nixos-${nixos_version}-${RELEASE_TAG}.qcow2"
+            echo "url=$(jq -r '.[0].browser_download_url' <<<"$assets")"
+            # GitHub reports asset digests as "sha256:<hex>"
+            echo "sha256=$(jq -r '.[0].digest // "" | sub("^sha256:"; "")' <<<"$assets")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@d1b6cd204f8dceda5b3eaad7f1f767be390056cd # v4.2.0
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+      - name: Import image into Proxmox
+        env:
+          IMAGE_FILENAME: ${{ steps.image.outputs.filename }}
+          IMAGE_URL: ${{ steps.image.outputs.url }}
+          IMAGE_SHA256: ${{ steps.image.outputs.sha256 }}
+        run: |
+          api() {
+            curl --fail-with-body --silent --show-error \
+              -H "Authorization: PVEAPIToken=${PROXMOX_TOKEN_ID}=${PROXMOX_TOKEN_SECRET}" \
+              "$@"
+          }
+          base="${PROXMOX_API_URL%/}/api2/json"
+
+          # Like the dashboard, default to the first online node in name order
+          node="${PROXMOX_NODE:-$(api "${base}/nodes" | jq -r '[.data[] | select(.status == "online") | .node] | sort | first')}"
+          echo "Importing ${IMAGE_FILENAME} into ${PROXMOX_IMPORT_STORAGE} on ${node}"
+
+          args=(
+            --data-urlencode "content=import"
+            --data-urlencode "filename=${IMAGE_FILENAME}"
+            --data-urlencode "url=${IMAGE_URL}"
+            --data-urlencode "verify-certificates=1"
+          )
+          if [ -n "${IMAGE_SHA256}" ]; then
+            args+=(--data-urlencode "checksum=${IMAGE_SHA256}" --data-urlencode "checksum-algorithm=sha256")
+          fi
+
+          upid=$(api -X POST "${base}/nodes/${node}/storage/${PROXMOX_IMPORT_STORAGE}/download-url" "${args[@]}" | jq -r .data)
+          task="${base}/nodes/${node}/tasks/$(jq -rn --arg upid "$upid" '$upid | @uri')"
+
+          # download-url runs as a background task, so wait up to 30 minutes for it to finish
+          for _ in $(seq 180); do
+            status=$(api "${task}/status" | jq -c .data)
+            if [ "$(jq -r .status <<<"$status")" = "stopped" ]; then
+              exitstatus=$(jq -r .exitstatus <<<"$status")
+              if [ "$exitstatus" = "OK" ] || [[ "$exitstatus" == WARNINGS:* ]]; then
+                echo "Imported ${IMAGE_FILENAME} (${exitstatus})"
+                exit 0
+              fi
+              echo "Error: Proxmox task failed: ${exitstatus}" >&2
+              api "${task}/log?limit=50" | jq -r '.data[].t' >&2
+              exit 1
+            fi
+            sleep 10
+          done
+
+          echo "Error: timed out waiting for Proxmox task ${upid}" >&2
+          exit 1
