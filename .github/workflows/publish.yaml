@@ -50,15 +50,15 @@ jobs:
         run: nix build .#${{ steps.image-package.outputs.package }}
       - name: Copy QCOW2 image
         run: |
-          cp result/*.qcow2 nixos-cloud-proxmox-${{ steps.version.outputs.version }}-x86_64.qcow2
+          cp result/*.qcow2 nixos-pxmx-${{ steps.version.outputs.version }}-x86_64.qcow2
       - name: Check image size
         run: |
-          ls -lh nixos-cloud-proxmox-${{ steps.version.outputs.version }}-x86_64.qcow2
+          ls -lh nixos-pxmx-${{ steps.version.outputs.version }}-x86_64.qcow2
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
           name: qcow2-artifact-x86_64
-          path: nixos-cloud-proxmox-${{ steps.version.outputs.version }}-x86_64.qcow2
+          path: nixos-pxmx-${{ steps.version.outputs.version }}-x86_64.qcow2
   create-release:
     needs: build
     runs-on: ubuntu-latest
