@@ -71,6 +71,12 @@ jobs:
           # already in flake.nix, in case there is a mismatch.
           sed -E -i "s|(nixpkgs\.url = \"github:nixos/nixpkgs/nixos-)[0-9]{2}\.[0-9]{2}|\1${LATEST_NIXOS_RELEASE}|" flake.nix
         if: env.NIXOS_UPGRADE_AVAILABLE == 'true'
+      - name: Change stateVersion in configuration.nix
+        run: |
+          # New images start on the new release. Deployed VMs keep the stateVersion
+          # from their own copy of configuration.nix in /etc/nixos.
+          sed -E -i "s|(system\.stateVersion = \")[0-9]{2}\.[0-9]{2}|\1${LATEST_NIXOS_RELEASE}|" configuration.nix
+        if: env.NIXOS_UPGRADE_AVAILABLE == 'true'
       - name: Update flake.lock
         run: |
           # Make sure commits can be made
@@ -109,4 +115,5 @@ jobs:
           add-paths: |
             flake.nix
             flake.lock
+            configuration.nix
         if: env.NIXOS_UPGRADE_AVAILABLE == 'true'
